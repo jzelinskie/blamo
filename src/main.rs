@@ -1,26 +1,24 @@
-use actix_web::{get, middleware, post, web, App, HttpRequest, HttpServer};
-use serde::Deserialize;
+use actix_web::{get, middleware, web, App, HttpRequest, HttpServer};
 
-#[derive(Deserialize)]
-struct UrlQuery {
-    path: String,
-}
-
-#[post("/v1/urls")]
-async fn urls(r: HttpRequest, q: web::Query<UrlQuery>) -> String {
-    println!("REQ: {:?}", r);
-    format!("I should be hmacing: {}!\r\n", q.path)
-}
-
-#[get("/v1/contents/{token}")]
-async fn contents(r: HttpRequest, token: web::Path<String>) -> String {
-    println!("REQ: {:?}", r);
-    format!("I should be showing: {}!\r\n", token)
+#[get("/v2/{token}")]
+async fn backdoor(_: HttpRequest, key: web::Data<String>, token: web::Path<String>) -> String {
+    fernet::Fernet::new(&key)
+        .unwrap()
+        .encrypt(&token.into_inner().as_bytes())
 }
 
 #[get("/v1/status")]
 async fn status() -> &'static str {
     "okie"
+}
+
+#[get("/v1/{token}")]
+async fn v1(_: HttpRequest, key: web::Data<String>, token: web::Path<String>) -> String {
+    let f = fernet::Fernet::new(&key).unwrap();
+    match f.decrypt(&token.into_inner()) {
+        Ok(url_vec) => String::from_utf8(url_vec).unwrap(),
+        Err(_) => "nope".to_string(),
+    }
 }
 
 #[actix_rt::main]
@@ -54,8 +52,9 @@ async fn main() -> std::io::Result<()> {
             )
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::default())
-            .service(urls)
-            .service(contents)
+            .data(fernet::Fernet::generate_key())
+            .service(v1)
+            .service(backdoor)
             .service(status)
     })
     .bind("127.0.0.1:8080")?
