@@ -1,6 +1,7 @@
 use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer};
 
 use actix_web::http::header::HeaderValue;
+use fernet::Fernet;
 
 #[get("/v2/{token}")]
 async fn backdoor(key: web::Data<String>, token: web::Path<String>) -> HttpResponse {
@@ -138,30 +139,100 @@ async fn main() -> std::io::Result<()> {
             clap::SubCommand::with_name("key")
                 .about("key management")
                 .setting(clap::AppSettings::ArgRequiredElseHelp)
-                .arg(clap::Arg::with_name("generate").help("generate a new key")),
+                .subcommand(clap::SubCommand::with_name("generate").about("generate a new key"))
+                .subcommand(
+                    clap::SubCommand::with_name("encrypt")
+                        .about("encrypt a message")
+                        .arg(
+                            clap::Arg::with_name("key")
+                                .required(true)
+                                .takes_value(true)
+                        )
+                        .arg(
+                            clap::Arg::with_name("message")
+                                .required(true)
+                                .takes_value(true)
+                        ),
+                )
+                .subcommand(
+                    clap::SubCommand::with_name("decrypt")
+                        .about("decrypt a message")
+                        .arg(
+                            clap::Arg::with_name("key")
+                                .required(true)
+                                .takes_value(true)
+                        )
+                        .arg(
+                            clap::Arg::with_name("message")
+                                .required(true)
+                                .takes_value(true)
+                        ),
+                ),
         )
         .subcommand(
             clap::SubCommand::with_name("server")
                 .about("http proxy server")
                 .setting(clap::AppSettings::ArgRequiredElseHelp)
-                .arg(clap::Arg::with_name("run").help("run the server")),
+                .subcommand(
+                    clap::SubCommand::with_name("run")
+                        .about("run the server")
+                        .setting(clap::AppSettings::ArgRequiredElseHelp)
+                        .arg(
+                            clap::Arg::with_name("key")
+                                .required(true)
+                                .takes_value(true)
+                                .help("key used to decrypt URLs"),
+                        ),
+                ),
         )
         .get_matches();
 
     if let Some(matches) = matches.subcommand_matches("key") {
-        if matches.is_present("generate") {
+        if let Some(_) = matches.subcommand_matches("generate") {
             println!("{}", fernet::Fernet::generate_key());
+            return Ok(());
+        }
+
+        if let Some(matches) = matches.subcommand_matches("encrypt") {
+            let key = match Fernet::new(matches.value_of("key").unwrap()) {
+                Some(x) => x,
+                None => return Ok(()), // TODO(jzelinskie): exit 1
+            };
+
+            let message = matches.value_of("message").unwrap();
+            println!("{}", key.encrypt(message.as_bytes()));
+
+            return Ok(());
+        }
+
+        if let Some(matches) = matches.subcommand_matches("decrypt") {
+            let key = match Fernet::new(matches.value_of("key").unwrap()) {
+                Some(x) => x,
+                None => return Ok(()), // TODO(jzelinskie): exit 1
+            };
+
+            let message = matches.value_of("message").unwrap();
+            let decrypted_message = match key.decrypt(message) {
+                Ok(x) => x,
+                Err(_) => return Ok(()), // TODO(jzelinskie) exit 1
+            };
+
+            println!("{}", String::from_utf8(decrypted_message).unwrap());
+
             return Ok(());
         }
     }
 
     if let Some(matches) = matches.subcommand_matches("server") {
-        if matches.is_present("run") {
-            return HttpServer::new(|| {
+        if let Some(matches) = matches.subcommand_matches("run") {
+            let key = matches.value_of("key").unwrap().to_owned();
+            println!("running server with key: {}", &key);
+            return HttpServer::new(move || {
+                let key = key.clone();
                 App::new()
                     .wrap(middleware::Compress::default())
                     .wrap(middleware::Logger::default())
-                    .data(fernet::Fernet::generate_key())
+                    .data(key)
                     .service(metrics)
                     .service(backdoor)
                     .service(proxy)
@@ -172,5 +243,5 @@ async fn main() -> std::io::Result<()> {
             .await;
         }
     }
-    Ok(())
+    unreachable!()
 }
