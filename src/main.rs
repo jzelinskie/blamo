@@ -1,24 +1,117 @@
-use actix_web::{get, middleware, web, App, HttpRequest, HttpServer};
+use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer};
+
+use actix_web::http::header::HeaderValue;
 
 #[get("/v2/{token}")]
-async fn backdoor(_: HttpRequest, key: web::Data<String>, token: web::Path<String>) -> String {
-    fernet::Fernet::new(&key)
-        .unwrap()
-        .encrypt(&token.into_inner().as_bytes())
-}
+async fn backdoor(key: web::Data<String>, token: web::Path<String>) -> HttpResponse {
+    let f = match fernet::Fernet::new(&key) {
+        Some(x) => x,
+        None => return HttpResponse::InternalServerError().finish(),
+    };
 
-#[get("/v1/status")]
-async fn status() -> &'static str {
-    "okie"
+    let mut schemed_token = "https://".to_owned();
+    schemed_token.push_str(&token.into_inner());
+
+    HttpResponse::Ok().body(f.encrypt(&schemed_token.as_bytes()))
 }
 
 #[get("/v1/{token}")]
-async fn v1(_: HttpRequest, key: web::Data<String>, token: web::Path<String>) -> String {
-    let f = fernet::Fernet::new(&key).unwrap();
+async fn proxy(
+    request: HttpRequest,
+    key: web::Data<String>,
+    token: web::Path<String>,
+) -> HttpResponse {
+    let f = match fernet::Fernet::new(&key) {
+        Some(x) => x,
+        None => return HttpResponse::InternalServerError().finish(),
+    };
+
     match f.decrypt(&token.into_inner()) {
-        Ok(url_vec) => String::from_utf8(url_vec).unwrap(),
-        Err(_) => "nope".to_string(),
+        Ok(url_vec) => proxy_response(request, String::from_utf8(url_vec).unwrap()),
+        Err(_) => HttpResponse::BadRequest().finish(),
     }
+}
+
+fn transferred_headers(request: HttpRequest) -> Vec<(String, String)> {
+    vec![
+        ("Via", "hello"),
+        ("User-Agent", "hello"),
+        (
+            "Accept",
+            request.headers().get_or("Accept", "image/*").as_str(),
+        ),
+        (
+            "Accept-Encoding",
+            request.headers().get_or("Accept-Encoding", "").as_str(),
+        ),
+        ("X-Frame-Options", "deny"),
+        ("X-XSS-Protection", "1; mode=block"),
+        ("X-Content-Type-Options", "nosniff"),
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+        ),
+    ]
+    .iter()
+    .map(|(x, y)| (x.to_string(), y.to_string()))
+    .collect()
+}
+
+trait GetOr {
+    fn get_or(&self, header: &str, default: &str) -> String;
+}
+
+impl GetOr for actix_web::http::header::HeaderMap {
+    fn get_or(&self, header: &str, default: &str) -> String {
+        String::from(
+            self.get(header)
+                .unwrap_or(&HeaderValue::from_str(default).unwrap())
+                .to_str()
+                .unwrap(),
+        )
+    }
+}
+
+fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
+    use actix_web::http::Uri;
+
+    let parsed_url = match url.clone().parse::<Uri>() {
+        Ok(x) => x,
+        Err(_) => return HttpResponse::BadRequest().finish(),
+    };
+
+    let scheme = match parsed_url.scheme() {
+        Some(x) => x.to_string(),
+        None => return HttpResponse::BadRequest().finish(),
+    };
+
+    match scheme.as_str() {
+        "http" => (),
+        _ => return HttpResponse::BadRequest().finish(),
+    };
+
+    HttpResponse::Ok()
+        .header("Via", "blamo!")
+        .header("X-Frame-Options", "deny")
+        .header("X-XSS-Protection", "1; mode=block")
+        .header("X-Content-Type_options", "nosniff")
+        .header(
+            "Content-Security-Policy",
+            "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+        )
+        .body(scheme)
+}
+
+#[get("/v1/_metrics")]
+async fn metrics() -> HttpResponse {
+    use prometheus::{Encoder, TextEncoder};
+
+    let mut buf = vec![];
+    TextEncoder::new()
+        .encode(&prometheus::gather(), &mut buf)
+        .unwrap();
+
+    HttpResponse::Ok().body(buf)
 }
 
 #[actix_rt::main]
@@ -37,28 +130,47 @@ async fn main() -> std::io::Result<()> {
     println!("Downloaded: {:?} bytes", body.len());
     */
 
-    HttpServer::new(|| {
-        App::new()
-            .wrap(
-                middleware::DefaultHeaders::new()
-                    .header("Via", "blamo!")
-                    .header("X-Frame-Options", "deny")
-                    .header("X-XSS-Protection", "1; mode=block")
-                    .header("X-Content-Type_options", "nosniff")
-                    .header(
-                        "Content-Security-Policy",
-                        "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
-                    ),
-            )
-            .wrap(middleware::Compress::default())
-            .wrap(middleware::Logger::default())
-            .data(fernet::Fernet::generate_key())
-            .service(v1)
-            .service(backdoor)
-            .service(status)
-    })
-    .bind("127.0.0.1:8080")?
-    .workers(1)
-    .run()
-    .await
+    let matches = clap::App::new("blamo!")
+        .version("0.0.1")
+        .about("securely serve trusted, insecure content")
+        .author("Jimmy Zelinskie <jimmyzelinskie+git@gmail.com>")
+        .subcommand(
+            clap::SubCommand::with_name("key")
+                .about("key management")
+                .setting(clap::AppSettings::ArgRequiredElseHelp)
+                .arg(clap::Arg::with_name("generate").help("generate a new key")),
+        )
+        .subcommand(
+            clap::SubCommand::with_name("server")
+                .about("http proxy server")
+                .setting(clap::AppSettings::ArgRequiredElseHelp)
+                .arg(clap::Arg::with_name("run").help("run the server")),
+        )
+        .get_matches();
+
+    if let Some(matches) = matches.subcommand_matches("key") {
+        if matches.is_present("generate") {
+            println!("{}", fernet::Fernet::generate_key());
+            return Ok(());
+        }
+    }
+
+    if let Some(matches) = matches.subcommand_matches("server") {
+        if matches.is_present("run") {
+            return HttpServer::new(|| {
+                App::new()
+                    .wrap(middleware::Compress::default())
+                    .wrap(middleware::Logger::default())
+                    .data(fernet::Fernet::generate_key())
+                    .service(metrics)
+                    .service(backdoor)
+                    .service(proxy)
+            })
+            .bind("127.0.0.1:8080")?
+            .workers(1)
+            .run()
+            .await;
+        }
+    }
+    Ok(())
 }
