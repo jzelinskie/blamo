@@ -6,6 +6,16 @@ Blamo is a webserver that will securely serve trusted, insecure content.
 
 This project is a slight iteration of the design of GitHub's [camo].
 
+## CLI
+
+```sh
+$ export BLAMO_KEY=$(blamo key generate)
+$ blamo key decrypt $BLAMO_KEY $(blamo key encrypt $BLAMO_KEY "hello world")
+hello world
+$ blamo server run $BLAMO_KEY
+listening on 8080...
+```
+
 ## API
 
 ### `GET /v1/{token}`
