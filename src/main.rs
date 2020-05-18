@@ -3,31 +3,13 @@ use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer
 use actix_web::http::header::HeaderValue;
 use fernet::Fernet;
 
-#[get("/v2/{token}")]
-async fn backdoor(key: web::Data<String>, token: web::Path<String>) -> HttpResponse {
-    let f = match fernet::Fernet::new(&key) {
-        Some(x) => x,
-        None => return HttpResponse::InternalServerError().finish(),
-    };
-
-    let mut schemed_token = "https://".to_owned();
-    schemed_token.push_str(&token.into_inner());
-
-    HttpResponse::Ok().body(f.encrypt(&schemed_token.as_bytes()))
-}
-
 #[get("/v1/{token}")]
 async fn proxy(
     request: HttpRequest,
-    key: web::Data<String>,
+    key: web::Data<fernet::Fernet>,
     token: web::Path<String>,
 ) -> HttpResponse {
-    let f = match fernet::Fernet::new(&key) {
-        Some(x) => x,
-        None => return HttpResponse::InternalServerError().finish(),
-    };
-
-    match f.decrypt(&token.into_inner()) {
+    match key.decrypt(&token.into_inner()) {
         Ok(url_vec) => proxy_response(request, String::from_utf8(url_vec).unwrap()),
         Err(_) => HttpResponse::BadRequest().finish(),
     }
@@ -135,6 +117,7 @@ async fn main() -> std::io::Result<()> {
         .version("0.0.1")
         .about("securely serve trusted, insecure content")
         .author("Jimmy Zelinskie <jimmyzelinskie+git@gmail.com>")
+        .setting(clap::AppSettings::SubcommandRequiredElseHelp)
         .subcommand(
             clap::SubCommand::with_name("key")
                 .about("key management")
@@ -143,29 +126,21 @@ async fn main() -> std::io::Result<()> {
                 .subcommand(
                     clap::SubCommand::with_name("encrypt")
                         .about("encrypt a message")
-                        .arg(
-                            clap::Arg::with_name("key")
-                                .required(true)
-                                .takes_value(true)
-                        )
+                        .arg(clap::Arg::with_name("key").required(true).takes_value(true))
                         .arg(
                             clap::Arg::with_name("message")
                                 .required(true)
-                                .takes_value(true)
+                                .takes_value(true),
                         ),
                 )
                 .subcommand(
                     clap::SubCommand::with_name("decrypt")
                         .about("decrypt a message")
-                        .arg(
-                            clap::Arg::with_name("key")
-                                .required(true)
-                                .takes_value(true)
-                        )
+                        .arg(clap::Arg::with_name("key").required(true).takes_value(true))
                         .arg(
                             clap::Arg::with_name("message")
                                 .required(true)
-                                .takes_value(true)
+                                .takes_value(true),
                         ),
                 ),
         )
@@ -225,16 +200,27 @@ async fn main() -> std::io::Result<()> {
 
     if let Some(matches) = matches.subcommand_matches("server") {
         if let Some(matches) = matches.subcommand_matches("run") {
-            let key = matches.value_of("key").unwrap().to_owned();
-            println!("running server with key: {}", &key);
+            let key_str = matches.value_of("key").unwrap().to_owned();
+
+            match fernet::Fernet::new(&key_str) {
+                Some(x) => x,
+                None => return Ok(()), // TODO(jzelinskie): exit 1
+            };
+
+            println!("listening on localhost:8080...");
             return HttpServer::new(move || {
-                let key = key.clone();
+                let key = fernet::Fernet::new(&key_str.clone()).unwrap();
                 App::new()
                     .wrap(middleware::Compress::default())
                     .wrap(middleware::Logger::default())
-                    .data(key)
+                    .service(
+                        web::resource("/v1/_healthy").route(web::get().to(|| HttpResponse::Ok())),
+                    )
+                    .service(
+                        web::resource("/v1/_ready").route(web::get().to(|| HttpResponse::Ok())),
+                    )
                     .service(metrics)
-                    .service(backdoor)
+                    .data(key)
                     .service(proxy)
             })
             .bind("127.0.0.1:8080")?
