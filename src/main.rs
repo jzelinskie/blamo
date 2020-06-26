@@ -1,5 +1,6 @@
 use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer};
 
+use anyhow;
 use actix_web::http::header::HeaderValue;
 use fernet::Fernet;
 
@@ -17,8 +18,8 @@ async fn proxy(
 
 fn transferred_headers(request: HttpRequest) -> Vec<(String, String)> {
     vec![
-        ("Via", "hello"),
-        ("User-Agent", "hello"),
+        ("Via", "blamo!"),
+        ("User-Agent", request.headers().get_or("User-Agent", "blamo!").as_str()),
         (
             "Accept",
             request.headers().get_or("Accept", "image/*").as_str(),
@@ -98,7 +99,7 @@ async fn metrics() -> HttpResponse {
 }
 
 #[actix_rt::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     /*
     let client = awc::Client::new();
 
@@ -162,6 +163,7 @@ async fn main() -> std::io::Result<()> {
         )
         .get_matches();
 
+    let invalid_key = anyhow::anyhow!("invalid key");
     if let Some(matches) = matches.subcommand_matches("key") {
         if let Some(_) = matches.subcommand_matches("generate") {
             println!("{}", fernet::Fernet::generate_key());
@@ -169,31 +171,17 @@ async fn main() -> std::io::Result<()> {
         }
 
         if let Some(matches) = matches.subcommand_matches("encrypt") {
-            let key = match Fernet::new(matches.value_of("key").unwrap()) {
-                Some(x) => x,
-                None => return Ok(()), // TODO(jzelinskie): exit 1
-            };
-
+            let key = Fernet::new(matches.value_of("key").unwrap()).ok_or_else(|| invalid_key)?;
             let message = matches.value_of("message").unwrap();
             println!("{}", key.encrypt(message.as_bytes()));
-
             return Ok(());
         }
 
         if let Some(matches) = matches.subcommand_matches("decrypt") {
-            let key = match Fernet::new(matches.value_of("key").unwrap()) {
-                Some(x) => x,
-                None => return Ok(()), // TODO(jzelinskie): exit 1
-            };
-
+            let key = Fernet::new(matches.value_of("key").unwrap()).ok_or_else(|| invalid_key)?;
             let message = matches.value_of("message").unwrap();
-            let decrypted_message = match key.decrypt(message) {
-                Ok(x) => x,
-                Err(_) => return Ok(()), // TODO(jzelinskie) exit 1
-            };
-
+            let decrypted_message = key.decrypt(message).map_err(|_| anyhow::anyhow!("failed to decrypt message"))?;
             println!("{}", String::from_utf8(decrypted_message).unwrap());
-
             return Ok(());
         }
     }
@@ -202,10 +190,8 @@ async fn main() -> std::io::Result<()> {
         if let Some(matches) = matches.subcommand_matches("run") {
             let key_str = matches.value_of("key").unwrap().to_owned();
 
-            match fernet::Fernet::new(&key_str) {
-                Some(x) => x,
-                None => return Ok(()), // TODO(jzelinskie): exit 1
-            };
+            // Ensure the key is valid before trying to handle any requests.
+            Fernet::new(&key_str).ok_or_else(|| invalid_key)?;
 
             println!("listening on localhost:8080...");
             return HttpServer::new(move || {
@@ -226,7 +212,8 @@ async fn main() -> std::io::Result<()> {
             .bind("127.0.0.1:8080")?
             .workers(1)
             .run()
-            .await;
+            .await
+            .map_err(From::from)
         }
     }
     unreachable!()
