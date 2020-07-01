@@ -1,7 +1,6 @@
-use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer};
-
-use anyhow;
 use actix_web::http::header::HeaderValue;
+use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer};
+use anyhow;
 use fernet::Fernet;
 
 #[get("/v1/{token}")]
@@ -19,7 +18,10 @@ async fn proxy(
 fn transferred_headers(request: HttpRequest) -> Vec<(String, String)> {
     vec![
         ("Via", "blamo!"),
-        ("User-Agent", request.headers().get_or("User-Agent", "blamo!").as_str()),
+        (
+            "User-Agent",
+            request.headers().get_or("User-Agent", "blamo!").as_str(),
+        ),
         (
             "Accept",
             request.headers().get_or("Accept", "image/*").as_str(),
@@ -49,9 +51,9 @@ impl GetOr for actix_web::http::header::HeaderMap {
     fn get_or(&self, header: &str, default: &str) -> String {
         String::from(
             self.get(header)
-                .unwrap_or(&HeaderValue::from_str(default).unwrap())
+                .unwrap_or(&HeaderValue::from_str(default).expect("default header value should parse"))
                 .to_str()
-                .unwrap(),
+                .expect("header with a default should never fail .to_str()"),
         )
     }
 }
@@ -89,13 +91,11 @@ fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
 #[get("/v1/_metrics")]
 async fn metrics() -> HttpResponse {
     use prometheus::{Encoder, TextEncoder};
-
     let mut buf = vec![];
-    TextEncoder::new()
-        .encode(&prometheus::gather(), &mut buf)
-        .unwrap();
-
-    HttpResponse::Ok().body(buf)
+    match TextEncoder::new().encode(&prometheus::gather(), &mut buf) {
+        Ok(_) => HttpResponse::Ok().body(buf),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
 }
 
 #[actix_rt::main]
@@ -136,10 +136,10 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .subcommand(
                     clap::SubCommand::with_name("decrypt")
-                        .about("decrypt a message")
+                        .about("decrypt ciphertext")
                         .arg(clap::Arg::with_name("key").required(true).takes_value(true))
                         .arg(
-                            clap::Arg::with_name("message")
+                            clap::Arg::with_name("ciphertext")
                                 .required(true)
                                 .takes_value(true),
                         ),
@@ -153,12 +153,18 @@ async fn main() -> anyhow::Result<()> {
                     clap::SubCommand::with_name("run")
                         .about("run the server")
                         .setting(clap::AppSettings::ArgRequiredElseHelp)
-                        .arg(
+                        .args(&[
                             clap::Arg::with_name("key")
                                 .required(true)
                                 .takes_value(true)
                                 .help("key used to decrypt URLs"),
-                        ),
+                            clap::Arg::with_name("port")
+                                .short("p")
+                                .long("port")
+                                .takes_value(true)
+                                .default_value("8080")
+                                .help("port bound to serve HTTP requests"),
+                        ]),
                 ),
         )
         .get_matches();
@@ -171,31 +177,33 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Some(matches) = matches.subcommand_matches("encrypt") {
-            let key = Fernet::new(matches.value_of("key").unwrap()).ok_or_else(|| invalid_key)?;
-            let message = matches.value_of("message").unwrap();
+            let key = Fernet::new(matches.value_of("key").expect("key requires a value")).ok_or_else(|| invalid_key)?;
+            let message = matches.value_of("message").expect("message requires a value");
             println!("{}", key.encrypt(message.as_bytes()));
             return Ok(());
         }
 
         if let Some(matches) = matches.subcommand_matches("decrypt") {
-            let key = Fernet::new(matches.value_of("key").unwrap()).ok_or_else(|| invalid_key)?;
-            let message = matches.value_of("message").unwrap();
-            let decrypted_message = key.decrypt(message).map_err(|_| anyhow::anyhow!("failed to decrypt message"))?;
-            println!("{}", String::from_utf8(decrypted_message).unwrap());
+            let key = Fernet::new(matches.value_of("key").expect("key requires a value")).ok_or_else(|| invalid_key)?;
+            let ciphertext = matches.value_of("ciphertext").expect("ciphertext requires a value");
+            let decrypted_message = key
+                .decrypt(ciphertext)
+                .map_err(|_| anyhow::anyhow!("failed to decrypt ciphertext"))?;
+            println!("{}", String::from_utf8(decrypted_message)?);
             return Ok(());
         }
     }
 
     if let Some(matches) = matches.subcommand_matches("server") {
         if let Some(matches) = matches.subcommand_matches("run") {
-            let key_str = matches.value_of("key").unwrap().to_owned();
+            let key_str = matches.value_of("key").expect("key requires a value").to_owned();
 
             // Ensure the key is valid before trying to handle any requests.
             Fernet::new(&key_str).ok_or_else(|| invalid_key)?;
 
             println!("listening on localhost:8080...");
             return HttpServer::new(move || {
-                let key = fernet::Fernet::new(&key_str.clone()).unwrap();
+                let key = fernet::Fernet::new(&key_str.clone()).expect("key has been previously validated");
                 App::new()
                     .wrap(middleware::Compress::default())
                     .wrap(middleware::Logger::default())
@@ -213,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
             .workers(1)
             .run()
             .await
-            .map_err(From::from)
+            .map_err(From::from);
         }
     }
     unreachable!()
