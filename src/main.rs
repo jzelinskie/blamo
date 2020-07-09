@@ -33,9 +33,9 @@ async fn proxy(
             println!("400: failed to decrypt");
 
             HttpResponse::BadRequest()
-            .add_security_headers()
-            .add_cachebust_headers()
-            .finish()
+                .add_security_headers()
+                .add_cachebust_headers()
+                .finish()
         }
     }
 }
@@ -116,7 +116,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
             return HttpResponse::BadRequest()
                 .add_security_headers()
                 .add_cachebust_headers()
-                .finish()
+                .finish();
         }
     };
 
@@ -127,7 +127,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
             return HttpResponse::BadRequest()
                 .add_security_headers()
                 .add_cachebust_headers()
-                .finish()
+                .finish();
         }
     };
 
@@ -138,7 +138,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
             return HttpResponse::BadRequest()
                 .add_security_headers()
                 .add_cachebust_headers()
-                .finish()
+                .finish();
         }
     };
 
@@ -152,22 +152,39 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
             if x.status().is_success() {
                 x
             } else {
-                return HttpResponse::BadGateway().finish();
+                println!("502: upstream response non-200");
+                return HttpResponse::BadGateway()
+                    .add_security_headers()
+                    .add_cachebust_headers()
+                    .finish();
             }
         }
-        Err(_) => return HttpResponse::BadGateway().finish(),
+        Err(_) => {
+            println!("502: failure receiving upstream response");
+            return HttpResponse::BadGateway()
+                .add_security_headers()
+                .add_cachebust_headers()
+                .finish();
+        }
     };
 
     let body = match response.body().await {
         Ok(x) => x,
-        Err(_) => return HttpResponse::BadGateway().finish(),
+        Err(_) => {
+            println!("502: failure receiving upstream body");
+            return HttpResponse::BadGateway().finish();
+        }
     };
 
-
+    println!("200: proxied {}", url);
     HttpResponse::Ok()
         .header("Via", "blamo!")
         .add_security_headers()
-        .set_header("Content-Type", response.headers().get_or("Content-Type", "application/octet-stream"))
+        .content_type(
+            response
+                .headers()
+                .get_or("Content-Type", "application/octet-stream"),
+        )
         .body(body)
 }
 
@@ -241,8 +258,8 @@ fn parse_args<'a>() -> clap::ArgMatches<'a> {
 #[actix_rt::main]
 async fn main() -> anyhow::Result<()> {
     let matches = parse_args();
-
     let invalid_key = anyhow::anyhow!("invalid key");
+
     if let Some(matches) = matches.subcommand_matches("key") {
         if let Some(_) = matches.subcommand_matches("generate") {
             println!("{}", fernet::Fernet::generate_key());
