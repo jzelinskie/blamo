@@ -181,9 +181,8 @@ async fn metrics() -> HttpResponse {
     }
 }
 
-#[actix_rt::main]
-async fn main() -> anyhow::Result<()> {
-    let matches = clap::App::new("blamo!")
+fn parse_args<'a>() -> clap::ArgMatches<'a> {
+    return clap::App::new("blamo!")
         .version("0.0.1")
         .about("securely serve trusted, insecure content")
         .author("Jimmy Zelinskie <jimmyzelinskie+git@gmail.com>")
@@ -237,6 +236,11 @@ async fn main() -> anyhow::Result<()> {
                 ),
         )
         .get_matches();
+}
+
+#[actix_rt::main]
+async fn main() -> anyhow::Result<()> {
+    let matches = parse_args();
 
     let invalid_key = anyhow::anyhow!("invalid key");
     if let Some(matches) = matches.subcommand_matches("key") {
