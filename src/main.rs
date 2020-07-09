@@ -21,6 +21,7 @@ async fn proxy(
         {
             println!("400: already via blamo!");
             return HttpResponse::BadRequest()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish();
@@ -33,6 +34,7 @@ async fn proxy(
             println!("400: failed to decrypt");
 
             HttpResponse::BadRequest()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish()
@@ -40,68 +42,63 @@ async fn proxy(
     }
 }
 
-fn transferred_headers(request: HttpRequest) -> Vec<(String, String)> {
-    vec![
-        ("Via", "blamo! v0.0.1"),
-        ("User-Agent", "blamo! v0.0.1"),
-        (
-            "Accept",
-            request.headers().get_or("Accept", "image/*").as_str(),
-        ),
-        (
-            "Accept-Encoding",
-            request.headers().get_or("Accept-Encoding", "").as_str(),
-        ),
-        ("X-Frame-Options", "deny"),
-        ("X-XSS-Protection", "1; mode=block"),
-        ("X-Content-Type-Options", "nosniff"),
-        (
-            "Content-Security-Policy",
-            "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
-        ),
-    ]
-    .iter()
-    .map(|(x, y)| (x.to_string(), y.to_string()))
-    .collect()
-}
-
-trait HeaderExtensions {
+trait ResponseHeaderExtensions {
+    fn add_default_headers(&mut self) -> &mut Self;
     fn add_cachebust_headers(&mut self) -> &mut Self;
     fn add_security_headers(&mut self) -> &mut Self;
 }
 
-impl HeaderExtensions for actix_web::dev::HttpResponseBuilder {
+impl ResponseHeaderExtensions for actix_web::dev::HttpResponseBuilder {
+    fn add_default_headers(&mut self) -> &mut Self {
+        self.header("Via", "blamo!")
+            .header("Server", "blamo! v0.0.1")
+    }
+
     fn add_cachebust_headers(&mut self) -> &mut Self {
-        self.set_header(
+        self.header(
             "Cache-Control",
             "no-cache, no-store, private, must-revalidate",
         )
     }
 
     fn add_security_headers(&mut self) -> &mut Self {
-        self.set_header("X-Frame-Options", "deny")
-            .set_header("X-XSS-Protection", "1; mode=block")
-            .set_header("X-Content-Type-Options", "nosniff")
-            .set_header(
+        self.header("X-Frame-Options", "deny")
+            .header("X-XSS-Protection", "1; mode=block")
+            .header("X-Content-Type-Options", "nosniff")
+            .header(
                 "Content-Security-Policy",
                 "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
             )
     }
 }
 
-trait GetOr {
-    fn get_or(&self, header: &str, default: &str) -> String;
+trait RequestHeaderExtensions {
+    fn transfer_headers(self, request: &HttpRequest) -> Self;
 }
 
-impl GetOr for actix_web::http::header::HeaderMap {
-    fn get_or(&self, header: &str, default: &str) -> String {
-        String::from(
-            self.get(header)
-                .unwrap_or(
-                    &HeaderValue::from_str(default).expect("default header value should parse"),
-                )
-                .to_str()
-                .expect("header with a default should never fail .to_str()"),
+impl RequestHeaderExtensions for awc::ClientRequest {
+    fn transfer_headers(self, request: &HttpRequest) -> Self {
+        let headers = request.headers();
+        self.header(
+            "User-Agent",
+            headers
+                .get("User-Agent")
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("blamo! v0.0.1")),
+        )
+        .header(
+            "Accept",
+            headers
+                .get("Accept")
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("image/*")),
+        )
+        .header(
+            "Accept-Encoding",
+            headers
+                .get("Accept-Encoding")
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("*")),
         )
     }
 }
@@ -114,6 +111,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
         Err(_) => {
             println!("400: failed to parse URL");
             return HttpResponse::BadRequest()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish();
@@ -121,10 +119,11 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
     };
 
     let scheme = match parsed_url.scheme() {
-        Some(x) => x.to_string(),
+        Some(x) => x,
         None => {
             println!("400: failed to parse scheme");
             return HttpResponse::BadRequest()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish();
@@ -136,6 +135,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
         _ => {
             println!("400: scheme must be http");
             return HttpResponse::BadRequest()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish();
@@ -143,17 +143,19 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
     };
 
     let client = awc::Client::default();
-    let mut proxied_request = client.get(url.as_str());
-    for (k, v) in transferred_headers(request) {
-        proxied_request = proxied_request.header(k.as_str(), v.as_str())
-    }
-    let mut response = match proxied_request.send().await {
+    let mut response = match client
+        .get(url.as_str())
+        .transfer_headers(&request)
+        .send()
+        .await
+    {
         Ok(x) => {
             if x.status().is_success() {
                 x
             } else {
                 println!("502: upstream response non-200");
                 return HttpResponse::BadGateway()
+                    .add_default_headers()
                     .add_security_headers()
                     .add_cachebust_headers()
                     .finish();
@@ -162,6 +164,7 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
         Err(_) => {
             println!("502: failure receiving upstream response");
             return HttpResponse::BadGateway()
+                .add_default_headers()
                 .add_security_headers()
                 .add_cachebust_headers()
                 .finish();
@@ -172,18 +175,23 @@ async fn proxy_response(request: HttpRequest, url: String) -> HttpResponse {
         Ok(x) => x,
         Err(_) => {
             println!("502: failure receiving upstream body");
-            return HttpResponse::BadGateway().finish();
+            return HttpResponse::BadGateway()
+                .add_default_headers()
+                .add_security_headers()
+                .add_cachebust_headers()
+                .finish();
         }
     };
 
     println!("200: proxied {}", url);
     HttpResponse::Ok()
-        .header("Via", "blamo!")
+        .add_default_headers()
         .add_security_headers()
         .content_type(
             response
                 .headers()
-                .get_or("Content-Type", "application/octet-stream"),
+                .get("Content-Type")
+                .unwrap_or(&HeaderValue::from_static("application/octet-stream")),
         )
         .body(body)
 }
@@ -194,7 +202,10 @@ async fn metrics() -> HttpResponse {
     let mut buf = vec![];
     match TextEncoder::new().encode(&prometheus::gather(), &mut buf) {
         Ok(_) => HttpResponse::Ok().body(buf),
-        Err(_) => HttpResponse::InternalServerError().finish(),
+        Err(_) => HttpResponse::InternalServerError()
+            .add_default_headers()
+            .add_cachebust_headers()
+            .finish(),
     }
 }
 
