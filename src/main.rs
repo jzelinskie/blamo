@@ -12,20 +12,18 @@ async fn proxy(
     token: web::Path<String>,
 ) -> HttpResponse {
     // If the via header is from an instance of blamo, bail to avoid recursion.
-    // There's definitely a way to make this more succinct.
-    if let Some(via) = request.headers().get("Via") {
-        if via
-            .to_str()
-            .expect("http headers should be strings?")
-            .starts_with("blamo!")
-        {
-            println!("400: already via blamo!");
-            return HttpResponse::BadRequest()
-                .add_default_headers()
-                .add_security_headers()
-                .add_cachebust_headers()
-                .finish();
-        }
+    if request
+        .headers()
+        .get("Via")
+        .and_then(|x| x.to_str().ok())
+        .map_or(false, |x| x.starts_with("blamo!"))
+    {
+        println!("400: already via blamo!");
+        return HttpResponse::BadRequest()
+            .add_default_headers()
+            .add_security_headers()
+            .add_cachebust_headers()
+            .finish();
     };
 
     match key.decrypt(&token.into_inner()) {
