@@ -82,10 +82,10 @@ impl ResponseHeaderExtensions for actix_web::dev::HttpResponseBuilder {
             "Content-Encoding",
         ]
         .iter()
-        .for_each(|header| {
-            match headers.get(*header).cloned() {
+        .for_each(|&header| {
+            match headers.get(header).cloned() {
                 Some(value) => {
-                    self.header(*header, value);
+                    self.header(header, value);
                 }
                 None => (),
             };
