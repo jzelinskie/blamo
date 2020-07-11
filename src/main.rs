@@ -23,7 +23,15 @@ async fn proxy(
     };
 
     match key.decrypt(&token.into_inner()) {
-        Ok(url_vec) => proxy_response(request, String::from_utf8(url_vec).unwrap()).await,
+        Ok(url_vec) => {
+            match String::from_utf8(url_vec) {
+                Ok(url) => proxy_response(request, url).await,
+                Err(_) => {
+                    println!("400: failed to parse encrypted URL");
+                    HttpResponse::BadRequest().as_blamo_error()
+                }
+            }
+        }
         Err(_) => {
             println!("400: failed to decrypt");
             HttpResponse::BadRequest().as_blamo_error()
